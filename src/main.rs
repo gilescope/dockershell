@@ -33,10 +33,12 @@ fn try_do() -> Result<(), Error> {
     let mut lines = Vec::<String>::new();
     lines.push(String::from("FROM alpine:edge"));
     let mut debug = false;
+    let mut pwd : String = "/".into();
     loop {
-        print!(">> ");
+        let prompt = &(pwd.clone() + " ");
+        print!("{}", prompt);
         std::io::stdout().lock().flush().unwrap();
-        let readline = rl.readline(">> ");
+        let readline = rl.readline(prompt);
         match readline {
             Ok(mut line) => {
                 line = line.trim().to_string();
@@ -56,14 +58,17 @@ fn try_do() -> Result<(), Error> {
                     if line.starts_with("cd ") {
                         lines.push(String::from("WORKDIR ") + &line["cd ".len()..]); // /bin/sh -c
                         lines.push(String::from("RUN pwd")); // /bin/sh -c
-                        do_line(&lines, debug).unwrap();
+
+                        let (_state_change, results) = do_line(&lines, debug).unwrap();
+                        println!("{:?}", results[0].trim());
+                        pwd = results[0].trim().to_owned();
                     } else {
                         lines.push(String::from("RUN ") + &line); // /bin/sh -c
                         let exec_result = do_line(&lines, debug);
                         match exec_result {
-                            Ok(true) => {
+                            Ok((true, _)) => {
                                 lines.remove(lines.len() - 1); },//stateless
-                            Ok(false) => {},
+                            Ok((false, _)) => {},
                             Err(()) => { lines.pop(); }
                         }
                     }
@@ -90,7 +95,7 @@ fn try_do() -> Result<(), Error> {
 }
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
-fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<bool, ()>{
+fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<(bool, Vec<String>), ()>{
     {
         let mut dockerfile = File::create("Dockerfile").unwrap();
         dockerfile.write_all(command_lines[..command_lines.len() - 1].join("\n").as_bytes()).unwrap();
@@ -114,7 +119,7 @@ fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<bool, ()>{
 
     //Was it a stateless operation?
     let pattern = r#"{"stream":"Removing intermediate container"#;
-    let mut return_value = Ok(false);
+    let mut return_value = false;
     for line in BufReader::new(res).lines() {
         let buf = line.unwrap();
         if debug {
@@ -122,7 +127,7 @@ fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<bool, ()>{
         }
         if buf.starts_with(pattern) {
            // println!("Found one!");
-            return_value = Ok(true) // stateless transformation like 'ls' (n-1)
+            return_value = true; // stateless transformation like 'ls' (n-1)
         }
     }
 
@@ -177,7 +182,7 @@ fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<bool, ()>{
         Err(err) => {println!("{:?}", err); return Err(())}
     }
     println!();
-    return_value
+    Ok((return_value, results))
 }
 
 
