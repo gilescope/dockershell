@@ -7,4 +7,5 @@ edition = "2018"
 [dependencies]
 rustyline="3.0"
 rand="0.6"
+tar="0.4"
 dockworker={ path="../dockworker" }
