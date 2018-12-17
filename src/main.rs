@@ -1,11 +1,14 @@
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
-use std::io::{BufReader, BufRead};
-use std::io::Error;
 use dockworker::*;
 use dockworker::container::*;
 use rand::Rng;
+use std::io::Error;
+use std::io::{Write,BufReader, BufRead};
+use std::path::Path;
+use std::fs::File;
+use tar::Builder;
 
 fn main() {
     try_do().unwrap();
@@ -21,21 +24,51 @@ fn main() {
 /// show results of command
 ///
 fn try_do() -> Result<(), Error> {
-    //do_line(String::from("/bin/echo Hello"));
-    let docker = Docker::connect_with_defaults().unwrap();
-    println!("{:#?}", docker.system_info().unwrap());
+    //let docker = Docker::connect_with_defaults().unwrap();
 
     let mut rl = Editor::<()>::new();
-    if rl.load_history(".dockershell.history.txt").is_err() {
+    if rl.load_history("Dockerfile.dockershell").is_err() {
         println!("No previous history.");
     }
+    let mut lines = Vec::<String>::new();
+    lines.push(String::from("FROM alpine:edge"));
+    let mut debug = false;
     loop {
+        print!(">> ");
+        std::io::stdout().lock().flush().unwrap();
         let readline = rl.readline(">> ");
         match readline {
-            Ok(line) => {
-                rl.add_history_entry(line.as_ref());
-                println!("Line: {}", line);
-                do_line(line);
+            Ok(mut line) => {
+                line = line.trim().to_string();
+                match line.as_ref() {
+                    "" => {},
+                    "debug" => { debug= !debug; },
+                    "undo" => { let item = lines.pop(); println!("Undone: {:?}", item); }
+                    "layers" => {
+                        for (i, l) in lines.iter().enumerate() {
+                            println!("{}: {}", i, l);
+                        }
+                    },
+                    _ => {
+                    rl.add_history_entry(line.as_ref());
+                    //println!("Line: {}", &line);
+
+                    if line.starts_with("cd ") {
+                        lines.push(String::from("WORKDIR ") + &line["cd ".len()..]); // /bin/sh -c
+                        lines.push(String::from("RUN pwd")); // /bin/sh -c
+                        do_line(&lines, debug).unwrap();
+                    } else {
+                        lines.push(String::from("RUN ") + &line); // /bin/sh -c
+                        let exec_result = do_line(&lines, debug);
+                        match exec_result {
+                            Ok(true) => {
+                                lines.remove(lines.len() - 1); },//stateless
+                            Ok(false) => {},
+                            Err(()) => { lines.pop(); }
+                        }
+                    }
+                }
+            }
             },
             Err(ReadlineError::Interrupted) => {
                 println!("CTRL-C");
@@ -51,13 +84,13 @@ fn try_do() -> Result<(), Error> {
             }
         }
     }
-    rl.save_history(".dockershell.history.txt").unwrap();
+    rl.save_history("Dockerfile.dockershell").unwrap();
 
     Ok(())
 }
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
-fn do_line(command_lines: &Vec<String>) -> Result<(), ()>{
+fn do_line(command_lines: &Vec<String>, debug: bool) -> Result<bool, ()>{
     {
         let mut dockerfile = File::create("Dockerfile").unwrap();
         dockerfile.write_all(command_lines[..command_lines.len() - 1].join("\n").as_bytes()).unwrap();
@@ -79,15 +112,26 @@ fn do_line(command_lines: &Vec<String>) -> Result<(), ()>{
     let docker = Docker::connect_with_defaults().unwrap();
     let res = docker.build_image(options, Path::new("image.tar")).unwrap();
 
+    //Was it a stateless operation?
+    let pattern = r#"{"stream":"Removing intermediate container"#;
+    let mut return_value = Ok(false);
     for line in BufReader::new(res).lines() {
         let buf = line.unwrap();
-        println!("{}", &buf);
+        if debug {
+            println!("{}", &buf);
+        }
+        if buf.starts_with(pattern) {
+           // println!("Found one!");
+            return_value = Ok(true) // stateless transformation like 'ls' (n-1)
+        }
     }
 
     let mut host_config = ContainerHostConfig::new();
-    host_config.auto_remove(true);//TODO?
+    host_config.auto_remove(true);
     let img_to_use = &(String::from(image_name) + ":latest");
-    println!("img to use: {}", img_to_use);
+    if debug {
+        println!("img to use: {}", img_to_use);
+    }
     let mut create = ContainerCreateOptions::new(img_to_use);
     let mut args : Vec<String> = Vec::new();
 
@@ -96,8 +140,9 @@ fn do_line(command_lines: &Vec<String>) -> Result<(), ()>{
         args.push(String::from(arg));
     }
     args.remove(0); //asserrt [0] == RUN
-    println!("running cmd: {:?}", &args);
-//    create.entrypoint(args);
+    if debug {
+        println!("running cmd: {:?}", &args);
+    }
     for ar in args {
         create.cmd(ar);
     }
@@ -113,7 +158,9 @@ fn do_line(command_lines: &Vec<String>) -> Result<(), ()>{
     let mut results = Vec::<String>::new();
     match result {
         Ok(_) => {
-            println!("starting container id  {} with name  {} ",container.id, &container_name);
+            if debug {
+                println!("starting container id  {} with name  {} ", container.id, &container_name);
+            }
             let cont: AttachContainer = res.into();
             let mut line_reader = BufReader::new(cont.stdout);
 
@@ -130,7 +177,7 @@ fn do_line(command_lines: &Vec<String>) -> Result<(), ()>{
         Err(err) => {println!("{:?}", err); return Err(())}
     }
     println!();
-    Ok(())
+    return_value
 }
 
 
