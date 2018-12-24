@@ -5,15 +5,16 @@
 #![feature(await_macro)]
 #![feature(async_await)]
 
-extern crate pty;
-//extern crate tty;
-use futures::future::FutureExt;
-
-use futures::executor::block_on;
-
-//use pty::prelude::*;
+//extern crate pty;
 use std::pin::Pin;
+use std::io::{Write,BufReader, BufRead};
+use std::path::Path;
+use std::fs::File;
+
+use futures::future::FutureExt;
+use futures::executor::block_on;
 use futures::Future;
+
 use termion::raw::IntoRawMode;
 
 use rustyline::error::ReadlineError;
@@ -21,16 +22,12 @@ use rustyline::Editor;
 
 use dockworker::*;
 use dockworker::container::*;
+
 use rand::Rng;
-//use std::io::Error;
-use std::io::{Write,BufReader, BufRead};
-use std::path::Path;
-use std::fs::File;
+
 use tar::Builder;
 
-//use pty_shell::PtyHandler;
-//use pty_shell::winsize;
-use termios;
+//use termios;
 
 //struct Shell;
 //impl PtyHandler for Shell {
@@ -278,8 +275,6 @@ fn do_line(command_lines: &Vec<String>, debug: bool, tty: bool, image_name: Stri
         }
     }
     println!();
-
-    pty_shell::restore_termios(); // Exit raw mode for terminal...
 
     let commands = command_lines.clone();
     let image_name :String = String::from("img_") + &container_name;

@@ -5,17 +5,11 @@ authors = ["Giles Cope <gilescope@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-rustyline="3.0"
-rand="0.6"
-tar="0.4"
-dockworker={ path="../dockworker" }
-libc='0.2.45'
-mio='*'
-nix='*'
-pty='*'
-termios='*'
-futures-preview = { version="0.3.0-alpha.10" }
-termion="*"
-pty-shell={ path="../pty-shell" }
-
-#tty='*'
+rustyline="3.0"  # Command line reading
+rand="0.6"      # Unique container names
+tar="0.4"       # For building docker images
+dockworker={ path="../dockworker" } # to interact with docker
+futures-preview = { version="0.3.0-alpha.10" } # to run image build in parallel
+termion="*"         # to put terminal in raw mode for tty colors.
+#pty='*'
+#pty-shell={ path="../pty-shell" }
