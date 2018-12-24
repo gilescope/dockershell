@@ -9,3 +9,13 @@ rustyline="3.0"
 rand="0.6"
 tar="0.4"
 dockworker={ path="../dockworker" }
+libc='0.2.45'
+mio='*'
+nix='*'
+pty='*'
+termios='*'
+futures-preview = { version="0.3.0-alpha.10" }
+termion="*"
+pty-shell={ path="../pty-shell" }
+
+#tty='*'
