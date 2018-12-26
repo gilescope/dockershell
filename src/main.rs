@@ -27,43 +27,10 @@ use rand::Rng;
 
 use tar::Builder;
 
-//use termios;
-
-//struct Shell;
-//impl PtyHandler for Shell {
-//    fn input(&mut self, input: &[u8]) {
-//        // do something with input
-//    }
-//
-//    fn output(&mut self, output: &[u8]) {
-//        // do something with output
-//    }
-//
-//    fn resize(&mut self, winsize: &winsize::Winsize) {
-//        // do something with winsize
-//    }
-//
-//    fn shutdown(&mut self) {
-//        // prepare for shutdown
-//    }
-//}
-
 type Result<T> = std::result::Result<T,()>;
 
 fn main() {
-
-//    let fork = Fork::from_ptmx().unwra();
-//    if let Some(mut master) = fork.is_parent().ok() {
-//        let mut output = String::new();
-//
-//        match master.read_to_string(&mut output) {
-//            Ok(_nread) => println!("child tty is: {}", output.trim()),
-//            Err(e) => panic!("read error: {}", e),
-//        }
-//    }
-//    else {
-        try_do().unwrap();
- //   }
+     try_do().unwrap();
 }
 
 ///
@@ -83,8 +50,8 @@ fn try_do() -> Result<()> {
         if rl.load_history("Dockerfile.dockershell").is_err() {
             println!("No previous history.");
         }
-        let mut lines = Vec::<String>::new();
-        lines.push(String::from("FROM alpine:edge"));
+        let mut lines = Vec::<Vec<String>>::new();
+        lines.push(vec!["FROM".to_owned(), "alpine:edge".to_owned()]);
         let mut debug = true;
         let mut tty = true;
         let mut pwd : String = "/".into();
@@ -103,7 +70,7 @@ fn try_do() -> Result<()> {
                         "exit" => {
                             println!("Dockerfile of session:");
                             for l in lines.iter() {
-                                println!("{}", l);
+                                println!("{}", l.join(" "));
                             }
                             return Ok(())
                         }
@@ -112,7 +79,7 @@ fn try_do() -> Result<()> {
                         "undo" => { let item = lines.pop(); println!("Undone: {:?}", item); }
                         "layers" => {
                             for (i, l) in lines.iter().enumerate() {
-                                println!("{}: {}", i, l);
+                                println!("{}: {:?}", i, l);
                             }
                         },
                         _ => {
@@ -127,14 +94,25 @@ fn try_do() -> Result<()> {
                         };
 
                         if line.starts_with("cd ") {
-                            lines.push(String::from("WORKDIR ") + &line["cd ".len()..]); // /bin/sh -c
-                            lines.push(String::from("RUN pwd")); // /bin/sh -c
+//                            lines.push(String::from("WORKDIR ") + &line["cd ".len()..]); // /bin/sh -c
 
+                            //let exec_results = do_line(&lines, debug, tty, image_to_use).unwrap();
+                            //let use_img = *await!(build_image(image_to_use, lines.clone(), debug));
+                            lines.push(vec![
+                                "RUN".to_owned(),
+                                "/bin/sh".to_owned(),
+                                "-c".to_owned(),
+                                (line.clone() + " ; pwd").to_owned()
+                            ]);
+                            // /bin/sh -c
                             let exec_results = do_line(&lines, debug, tty, image_to_use).unwrap();
-                            println!("{:?}", exec_results.output[0].trim());
+                            lines.pop();
+
+                            println!("DIR SET TO {:?}", exec_results.output[0].trim());
                             pwd = exec_results.output[0].trim().to_owned();
+                            lines.push(vec!["WORKDIR".to_owned(),pwd.clone()]);
                         } else {
-                            lines.push(String::from("RUN ") + &line); // /bin/sh -c
+                            lines.push(vec![String::from("RUN"), line.clone()]); // /bin/sh -c
                             let exec_result = do_line(&lines, debug, tty, image_to_use);
                             match exec_result {
                                 Ok(ExecResults{state_change:true, output: _, image_name }) => {
@@ -174,7 +152,7 @@ pub struct ExecResults {
 }
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
-fn do_line(command_lines: &Vec<String>, debug: bool, tty: bool, image_name: String) -> Result<ExecResults>{
+fn do_line(command_lines: &Vec<Vec<String>>, debug: bool, tty: bool, image_name: String) -> Result<ExecResults>{
     let docker = Docker::connect_with_defaults().unwrap();
     let container_name: String = rand::thread_rng().gen_range(0., 1.3e4).to_string();
 
@@ -182,25 +160,24 @@ fn do_line(command_lines: &Vec<String>, debug: bool, tty: bool, image_name: Stri
     host_config.auto_remove(true);
     let mut img_to_use = String::new();
     img_to_use.clone_from(&image_name);
-    //img_to_use.push_str(":latest");
     if debug {
         println!("img to use: {}", img_to_use);
     }
 
     let mut create = ContainerCreateOptions::new(&img_to_use);
     create.tty(tty);
-    let mut args : Vec<String> = Vec::new();
+    //let mut args : Vec<String> = Vec::new();
 
-    let command_line = &command_lines[command_lines.len() - 1];
-    for arg in command_line.split(' ') {
-        args.push(String::from(arg));
-    }
+    let mut args = command_lines.last().unwrap().clone();
+//    for arg in command_line.split(' ') {
+//        args.push(String::from(arg));
+//    }
     args.remove(0); //asserrt [0] == RUN
     if debug {
         println!("running cmd: {:?}", &args);
     }
-    for ar in args {
-        create.cmd(ar);
+    for arg in args {
+        create.cmd(arg.to_string());
     }
 
     create.host_config(host_config);
@@ -283,12 +260,13 @@ fn do_line(command_lines: &Vec<String>, debug: bool, tty: bool, image_name: Stri
     Ok(ExecResults{ state_change:true, output:results, image_name: future_image})
 }
 
-async fn build_image(image_name: String, command_lines: Vec<String>, debug: bool) -> Box<String> {
+async fn build_image(image_name: String, command_lines: Vec<Vec<String>>, debug: bool) -> Box<String> {
     if debug { println!("building img {} as {:?}", &image_name, &command_lines) }
     let docker = Docker::connect_with_defaults().unwrap();
     {
         let mut dockerfile = File::create("Dockerfile").unwrap();
-        dockerfile.write_all(command_lines.join("\n").as_bytes()).unwrap();
+        let lines : Vec<String> = command_lines.iter().map(|args| args.join(" ")).collect();
+        dockerfile.write_all(lines.join("\n").as_bytes()).unwrap();
     }
     // Create tar file
     {
@@ -326,8 +304,8 @@ mod tests {
     #[test]
     fn initial_command() {
         let exec_results : ExecResults = do_line(&vec![
-            "FROM alpine:edge".to_owned(),
-            "RUN /bin/echo Hello World".to_owned(),
+            vec!["FROM".to_owned(), "alpine:edge".to_owned()],
+            vec!["RUN".to_owned(), "/bin/echo".to_owned(), "Hello World".to_owned()],
         ], true, false, "alpine:edge".to_owned()).unwrap();
 
         //assert!(!exec_results.state_change);//TODO this is not right.
@@ -341,9 +319,9 @@ mod tests {
     fn second_command() {
         block_on(async {
             let cmds = vec! [
-            "FROM alpine:edge".to_owned(),
-            r#"RUN /bin/sh -c "echo 'Hello World' > /tmp/file" "#.to_owned(),
-            "RUN /bin/cat /tmp/file".to_owned(),
+            vec!["FROM".to_owned(), "alpine:edge".to_owned()],
+            vec!["RUN".to_owned(), "/bin/sh".to_owned(), "-c".to_owned(), "echo 'Hello World' > /tmp/file".to_owned()],
+            vec!["RUN".to_owned(), "/bin/cat".to_owned(), "/tmp/file".to_owned()],
             ];
             let mut first = cmds.clone();
             first.pop();
