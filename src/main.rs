@@ -120,18 +120,19 @@ fn try_do() -> Result<()> {
                         } else {
                             lines.push(vec![
                                 "RUN".to_owned(),
-                                shell.to_owned(),
-                                "-c".to_owned(),
                                 line.clone()
                             ]);
-                            //lines.push(vec![String::from("RUN"), line.clone()]); // /bin/sh -c
                             let exec_result = do_line(&docker, &lines, debug, tty, image_to_use);
+
                             match exec_result {
                                 Ok(ExecResults{state_change:true, output: _, image_name }) => {
                                     last_image = Some(image_name);
-                                //    lines.remove(lines.len() - 1);
+
                                 },//stateless
-                                Ok(ExecResults{state_change:false, output: _, image_name: _ }) => {},
+                                Ok(ExecResults{state_change:false, output: _, image_name: _ }) => {
+                                    let removed = lines.remove(lines.len() - 1);
+                                    if debug { println!("No state change, removed {:?}", removed); }
+                                },
                                 Err(()) => { lines.pop(); }
                             }
                         }
@@ -165,10 +166,11 @@ pub struct ExecResults {
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
 fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: bool, image_name: String) -> Result<ExecResults>{
+    let shell = "/bin/sh".to_owned();
     let container_name: String = rand::thread_rng().gen_range(0., 1.3e4).to_string();
 
     let mut host_config = ContainerHostConfig::new();
-    host_config.auto_remove(true);
+    host_config.auto_remove(false);
     let mut img_to_use = String::new();
     img_to_use.clone_from(&image_name);
     if debug {
@@ -183,9 +185,11 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
     if debug {
         println!("running cmd: {:?}", &args);
     }
-    for arg in args {
-        create.cmd(arg.to_string());
-    }
+
+    create.cmd(shell);
+    create.cmd("-c".to_owned());
+    create.cmd(args.join(" "));
+
     create.host_config(host_config);
 
     let container = docker.create_container(Some(&container_name), &create).unwrap();
@@ -260,13 +264,26 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
     }
     println!();
 
-//    docker.
+    let search_name = String::from("/") + &container_name;
+    let mut filters = ContainerFilters::new();
+    filters.name(&search_name);
+
+    let res = docker.list_containers(None, None, None, filters).unwrap();
+    let container = res.first().unwrap();
+
+    let changes = docker.filesystem_changes(&container);
+    let state_change = match changes {
+        Ok(some) => { if debug { println!("CHANGES: {:?}", some); }; true },
+        Err(none) => { if debug { println!("CHANGES: {:?}", none); }; false }
+    };
+
+    docker.remove_container(&container_name, None, Some(true), None).unwrap();
 
     let commands = command_lines.clone();
     let image_name :String = String::from("img_") + &container_name;
 
     let future_image = build_image(image_name, commands, debug).boxed();
-    Ok(ExecResults{ state_change:true, output:results, image_name: future_image})
+    Ok(ExecResults{ state_change, output:results, image_name: future_image})
 }
 
 async fn build_image(image_name: String, command_lines: Vec<Vec<String>>, debug: bool) -> Box<String> {
