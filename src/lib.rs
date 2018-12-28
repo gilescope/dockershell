@@ -28,8 +28,14 @@ use tar::Builder;
 
 type Result<T> = std::result::Result<T,()>;
 
-fn main() {
-     try_do().unwrap();
+#[derive(Debug,Clone)]
+pub struct State {
+    pub debug: bool,
+    pub tty: bool,
+    pub lines: Vec<Vec<String>>,
+    pub image_name: String,
+    pub pwd: String,
+    pub shell: String
 }
 
 ///
@@ -41,7 +47,7 @@ fn main() {
 /// containerNext = container.commitImage
 /// show results of command
 ///
-fn try_do() -> Result<()> {
+pub fn interpreter_loop() -> Result<()> {
     let docker = Docker::connect_with_defaults().unwrap();
 
     block_on(async {
@@ -49,95 +55,54 @@ fn try_do() -> Result<()> {
         if rl.load_history("Dockerfile.dockershell").is_err() {
             println!("No previous history.");
         }
-        let mut lines = Vec::<Vec<String>>::new();
-        lines.push(vec!["FROM".to_owned(), "alpine:edge".to_owned()]);
-        let mut debug = false;
-        let mut tty = true;
-        let mut last_image : Option<Pin<Box<Future<Output=Box<String>>>>> = None;
-        let shell = "/bin/sh";
 
-        lines.push(vec![
+        let mut state = State {
+            debug: false,
+            tty: true,
+            lines: vec![vec!["FROM".to_owned(), "alpine:edge".to_owned()]],
+            image_name: "alpine:edge".to_owned(),
+            pwd: String::new(),
+            shell: "/bin/sh".to_owned()
+        };
+
+        let mut last_image : Option<Pin<Box<Future<Output=Box<String>>>>> = None;
+
+        state.lines.push(vec![
             "RUN".to_owned(),
-            shell.to_owned(),
-            "-c".to_owned(),
             ("pwd").to_owned()
         ]);
-        let exec_results = do_line(&docker, &lines, debug, tty, "alpine:edge".to_owned()).unwrap();
-        lines.pop();
-        let mut pwd = exec_results.output[0].trim().to_owned();
+
+        let exec_results = do_line(&docker, &state).unwrap();
+        state.lines.pop();
+        state.pwd = exec_results.output[0].trim().to_owned();
 
         loop {
-            let prompt = &(pwd.clone() + " ");
+            let prompt = &(state.pwd.clone() + " ");
             print!("{}", prompt);
             std::io::stdout().lock().flush().unwrap();
             let readline = rl.readline(prompt);
             match readline {
-                Ok(mut line) => {
-                    line = line.trim().to_string();
-                    match line.as_ref() {
-                        "" => {},
-                        "exit" => {
-                            println!("Dockerfile of session:");
-                            for l in lines.iter() {
-                                println!("{}", l.join(" "));
-                            }
-                            return Ok(())
-                        }
-                        "debug" => { debug= !debug; },
-                        "tty" => { tty = !tty },
-                        // TODO: undo 3 should remove 3rd item.
-                        // Replay breaks - fix then type continue.
-                        "undo" => { let item = lines.pop(); println!("Undone: {:?}", item); }
-                        "layers" => {
-                            for (i, l) in lines.iter().enumerate() {
-                                println!("{}: {:?}", i, l);
-                            }
+                Ok(line) => {
+                    rl.add_history_entry(line.as_ref());
+
+                    let docker = Docker::connect_with_defaults().unwrap();
+
+                    let mut next_state = state.clone();
+                    next_state.image_name = match last_image {
+                        None => next_state.image_name,
+                        Some(future) => *await!(future)
+                    };
+                    last_image = None;
+
+                    match parse_line(line, &next_state, &docker) {
+                        Ok(LineResult::NoOp) => {},
+                        Ok(LineResult::State(new_state, fut)) => {
+                            last_image = fut;
+                            state = new_state;
                         },
-                        _ => {
-                        rl.add_history_entry(line.as_ref());
-                        //println!("Line: {}", &line);
-
-                        let image_to_use_opt = last_image;
-                        last_image = None;
-                        let image_to_use : String = match image_to_use_opt {
-                            None => "alpine:edge".to_owned(),
-                            Some(future) => (*await!(future)).clone()
-                        };
-
-                        if line.starts_with("cd ") || line == "cd" {
-                            lines.push(vec![
-                                "RUN".to_owned(),
-                                shell.to_owned(),
-                                "-c".to_owned(),
-                                (line.clone() + " ; pwd").to_owned()
-                            ]);
-                            let exec_results = do_line(&docker, &lines, debug, tty, image_to_use).unwrap();
-                            lines.pop();
-
-                            if debug { println!("DIR SET TO {:?}", exec_results.output[0].trim()); }
-                            pwd = exec_results.output[0].trim().to_owned();
-                            lines.push(vec!["WORKDIR".to_owned(),pwd.clone()]);
-                        } else {
-                            lines.push(vec![
-                                "RUN".to_owned(),
-                                line.clone()
-                            ]);
-                            let exec_result = do_line(&docker, &lines, debug, tty, image_to_use);
-
-                            match exec_result {
-                                Ok(ExecResults{state_change:true, output: _, image_name }) => {
-                                    last_image = Some(image_name);
-
-                                },//stateless
-                                Ok(ExecResults{state_change:false, output: _, image_name: _ }) => {
-                                    let removed = lines.remove(lines.len() - 1);
-                                    if debug { println!("No state change, removed {:?}", removed); }
-                                },
-                                Err(()) => { lines.pop(); }
-                            }
-                        }
+                        Ok(LineResult::Exit) => { break; }
+                        Err(()) => {}
                     }
-                }
                 },
                 Err(ReadlineError::Interrupted) => {
                     println!("CTRL-C");
@@ -158,6 +123,92 @@ fn try_do() -> Result<()> {
     })
 }
 
+fn print_dockerfile(lines: &Vec<Vec<String>>)
+{
+    for l in lines.iter() {
+        println!("{}", l.join(" "));
+    }
+}
+fn print_layers(lines: &Vec<Vec<String>>)
+{
+    for (i, l) in lines.iter().enumerate() {
+        println!("{}: {:?}", i, l);
+    }
+}
+
+pub enum LineResult {
+    Exit,
+    NoOp, // E.g. print state...
+    State(State, Option<Pin<Box<Future<Output=Box<String>>>>>)
+}
+
+pub fn parse_line(mut line: String, state: &State, docker: &Docker) -> Result<LineResult> {
+    line = line.trim().to_string();
+    match line.as_ref() {
+        "" => { Ok(LineResult::NoOp) },
+        "exit" => {
+            println!("Dockerfile of session:");
+            print_dockerfile(&state.lines);
+            Ok(LineResult::Exit)
+        }
+        "debug" => {
+            let mut state = state.clone();
+            state.debug = !state.debug;
+            Ok(LineResult::State(state, None))
+        },
+        // TODO: undo 3 should remove 3rd item.
+        // Replay breaks - fix then type continue.
+        "undo" => {
+            let mut state = state.clone();
+            let item = state.lines.pop();
+            println!("Undone: {:?}", item);
+            Ok(LineResult::State(state, None))
+        }
+        "layers" => {
+            print_layers(&state.lines);
+            Ok(LineResult::NoOp)
+        },
+        _ => {
+            let mut state = state.clone();
+            if line.starts_with("cd ") || line == "cd" {
+                state.lines.push(vec![
+                    "RUN".to_owned(),
+             //       shell.to_owned(),
+             //       "-c".to_owned(),
+                    (line.clone() + " ; pwd").to_owned()
+                ]);
+                let exec_results = do_line(&docker, &state).unwrap();
+                state.lines.pop();
+
+                if state.debug { println!("DIR SET TO {:?}", exec_results.output[0].trim()); }
+                state.pwd = exec_results.output[0].trim().to_owned();
+                state.lines.push(vec!["WORKDIR".to_owned(),state.pwd.clone()]);
+                Ok(LineResult::State(state, Some(exec_results.image_name)))
+            } else {
+                state.lines.push(vec![
+                    "RUN".to_owned(),
+                    line.clone()
+                ]);
+                let exec_result = do_line(&docker, &state);
+
+                match exec_result {
+                    Ok(ExecResults{state_change:true, output: _, image_name }) => {
+                        Ok(LineResult::State(state, Some(image_name)))
+                    },
+                    Ok(ExecResults{state_change:false, output: _, image_name: _ }) => {
+                        let removed = state.lines.remove(state.lines.len() - 1);
+                        if state.debug { println!("No state change, removed {:?}", removed); }
+                        Ok(LineResult::NoOp)
+                    },
+                    Err(()) => {
+                        Err(())
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub struct ExecResults {
     pub state_change: bool,
     pub output: Vec<String>,
@@ -165,28 +216,25 @@ pub struct ExecResults {
 }
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
-fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: bool, image_name: String) -> Result<ExecResults>{
-    let shell = "/bin/sh".to_owned();
+fn do_line(docker: &Docker, state: &State) -> Result<ExecResults>{
     let container_name: String = rand::thread_rng().gen_range(0., 1.3e4).to_string();
 
     let mut host_config = ContainerHostConfig::new();
     host_config.auto_remove(false);
-    let mut img_to_use = String::new();
-    img_to_use.clone_from(&image_name);
-    if debug {
-        println!("img to use: {}", img_to_use);
+    if state.debug {
+        println!("img to use: {}", &state.image_name);
     }
 
-    let mut create = ContainerCreateOptions::new(&img_to_use);
-    create.tty(tty);
+    let mut create = ContainerCreateOptions::new(&state.image_name);
+    create.tty(state.tty);
 
-    let mut args = command_lines.last().unwrap().clone();
+    let mut args = state.lines.last().unwrap().clone();
     args.remove(0); //assert [0] == RUN
-    if debug {
+    if state.debug {
         println!("running cmd: {:?}", &args);
     }
 
-    create.cmd(shell);
+    create.cmd(state.shell.clone());
     create.cmd("-c".to_owned());
     create.cmd(args.join(" "));
 
@@ -195,7 +243,7 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
     let container = docker.create_container(Some(&container_name), &create).unwrap();
     let mut results = Vec::<String>::new();
 
-    if tty {
+    if state.tty {
             let res = docker
                 .attach_container_tty(&container.id, None, true, true, true, true, true)
                 .unwrap();
@@ -203,7 +251,7 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
 
             match result {
                 Ok(_) => {
-                    if debug {
+                    if state.debug {
                         println!("starting container id  {} with name  {} ", container.id, &container_name);
                     }
 
@@ -227,8 +275,7 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
                     return Err(())
                 }
             }
-        }
-    else {
+    } else {
         // non-tty mode kept for tests for now....
         let res = docker
             .attach_container(&container.id, None, true, true, true, true, true)
@@ -237,7 +284,7 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
 
         match result {
             Ok(_) => {
-                if debug {
+                if state.debug {
                     println!("starting container id  {} with name  {} ", container.id, &container_name);
                 }
 
@@ -273,16 +320,14 @@ fn do_line(docker: &Docker, command_lines: &Vec<Vec<String>>, debug: bool, tty: 
 
     let changes = docker.filesystem_changes(&container);
     let state_change = match changes {
-        Ok(some) => { if debug { println!("CHANGES: {:?}", some); }; true },
-        Err(none) => { if debug { println!("CHANGES: {:?}", none); }; false }
+        Ok(some) => { if state.debug { println!("CHANGES: {:?}", some); }; true },
+        Err(none) => { if state.debug { println!("CHANGES: {:?}", none); }; false }
     };
 
     docker.remove_container(&container_name, None, Some(true), None).unwrap();
 
-    let commands = command_lines.clone();
-    let image_name :String = String::from("img_") + &container_name;
-
-    let future_image = build_image(image_name, commands, debug).boxed();
+    let image_name = String::from("img_") + &container_name;
+    let future_image = build_image(image_name, state.lines.clone(), state.debug).boxed();
     Ok(ExecResults{ state_change, output:results, image_name: future_image})
 }
 
@@ -306,35 +351,35 @@ async fn build_image(image_name: String, command_lines: Vec<Vec<String>>, debug:
     };
     let res = docker.build_image(options, Path::new("image.tar")).unwrap();
 
-    //Was it a stateless operation?
-    //let pattern = r#"{"stream":"Removing intermediate container"#;
-    //let mut return_value = false;
     for line in BufReader::new(res).lines() {
         let buf = line.unwrap();
-        if debug {
-            println!("{}", &buf);
-        }
-//        if buf.starts_with(pattern) {
-//            // println!("Found one!");
-//            return_value = true; // stateless transformation like 'ls' (n-1)
-//        }
+        if debug { println!("{}", &buf); }
     }
     if debug { println!("built image {}", &image_name); }
     Box::new(image_name.to_owned())
 }
 
 mod tests {
-    use crate::{ExecResults, do_line};
+    use crate::{ExecResults, do_line, State};
     use futures::executor::block_on;
     use dockworker::Docker;
 
     #[test]
     fn initial_command() {
         let docker = Docker::connect_with_defaults().unwrap();
-        let exec_results : ExecResults = do_line(&docker, &vec![
-            vec!["FROM".to_owned(), "alpine:edge".to_owned()],
-            vec!["RUN".to_owned(), "/bin/echo".to_owned(), "Hello World".to_owned()],
-        ], true, false, "alpine:edge".to_owned()).unwrap();
+        let state = State{
+            lines: vec![
+                vec!["FROM".to_owned(), "alpine:edge".to_owned()],
+                vec!["RUN".to_owned(), "/bin/echo".to_owned(), "Hello World".to_owned()],
+            ],
+            debug:true,
+            tty: false,
+            image_name: "alpine:edge".to_owned(),
+            pwd: "/bin".to_owned(),
+            shell: "/bin/sh".to_owned()
+        };
+
+        let exec_results : ExecResults = do_line(&docker, &state).unwrap();
 
         //assert!(!exec_results.state_change);//TODO this is not right.
         let _x : Vec<_> = exec_results.output.iter().map(|line| println!("{}", line)).collect();
@@ -355,11 +400,21 @@ mod tests {
             let mut first = cmds.clone();
             first.pop();
 
-            let exec_results1 : ExecResults = do_line(&docker, &first, true, false, "alpine:edge".to_owned()).unwrap();
+            let mut state = State{
+                lines: first,
+                debug:true,
+                tty: false,
+                image_name: "alpine:edge".to_owned(),
+                pwd: "/bin".to_owned(),
+                shell: "/bin/sh".to_owned()
+            };
 
-            let img = await!(exec_results1.image_name);
+            let exec_results1 : ExecResults = do_line(&docker, &state).unwrap();
 
-            let exec_results: ExecResults = do_line(&docker, &cmds, true, false, (*img).clone()).unwrap();
+            state.lines = cmds;
+            state.image_name = *await!(exec_results1.image_name);
+
+            let exec_results: ExecResults = do_line(&docker, &state).unwrap();
 
             //assert!(!exec_results.state_change);
             let _x : Vec<_> = exec_results.output.iter().map( | line | println ! ("CMD_OUTPUT: {}", line)).collect();
