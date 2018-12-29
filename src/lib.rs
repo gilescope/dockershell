@@ -28,14 +28,60 @@ use tar::Builder;
 
 type Result<T> = std::result::Result<T,()>;
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct State {
     pub debug: bool,
+
+    /// Enables ascii colors and one day maybe Vi to work.
     pub tty: bool,
+
+    /// Should read from stdin for extra commands.
+    pub interactive: bool,
+
+    /// Initial commands to run.
     pub lines: Vec<Vec<String>>,
     pub image_name: String,
     pub pwd: String,
     pub shell: String
+}
+
+impl State {
+    pub fn test() -> State {
+        State {
+            interactive: false,
+            tty: false,
+            debug: true,
+            pwd: "/bin".to_owned(),
+            .. State::default()
+        }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            debug: false,
+            tty: true,
+            lines: vec![vec!["FROM".to_owned(), "alpine:edge".to_owned()]],
+            image_name: "alpine:edge".to_owned(),
+            pwd: String::new(),
+            shell: "/bin/sh".to_owned(),
+            interactive: true
+        }
+    }
+}
+
+pub trait ExecListener {
+    fn command_run(&mut self, line: &str,
+                   state: &State,
+                   line_result: Result<&LineResult>);
+}
+
+pub struct NoOpListener {}
+impl ExecListener for NoOpListener {
+    fn command_run(&mut self, _line: &str,
+                   _state: &State,
+                   _line_result: Result<&LineResult>) {}
 }
 
 ///
@@ -47,7 +93,7 @@ pub struct State {
 /// containerNext = container.commitImage
 /// show results of command
 ///
-pub fn interpreter_loop() -> Result<()> {
+pub fn interpreter_loop(initial_state: State, visitor: &mut ExecListener) -> Result<()> {
     let docker = Docker::connect_with_defaults().unwrap();
 
     block_on(async {
@@ -55,17 +101,44 @@ pub fn interpreter_loop() -> Result<()> {
         if rl.load_history("Dockerfile.dockershell").is_err() {
             println!("No previous history.");
         }
-
-        let mut state = State {
-            debug: false,
-            tty: true,
-            lines: vec![vec!["FROM".to_owned(), "alpine:edge".to_owned()]],
-            image_name: "alpine:edge".to_owned(),
-            pwd: String::new(),
-            shell: "/bin/sh".to_owned()
-        };
-
         let mut last_image : Option<Pin<Box<Future<Output=Box<String>>>>> = None;
+        let mut state = initial_state.clone();
+        state.lines.clear();
+        state.lines.push(initial_state.lines[0].clone());
+
+        assert_eq!(initial_state.lines[0][0], "FROM");
+        state.image_name = initial_state.lines[0][1].clone();
+
+        for line in initial_state.lines.iter().skip(1) { // skip FROM
+            let mut next_state = state.clone();
+            next_state.image_name = match last_image {
+                None => next_state.image_name,
+                Some(future) => *await!(future)
+            };
+            last_image = None;
+            let line = line.join(" ");
+            let result = parse_line(&line, &next_state, &docker);
+
+            visitor.command_run(&line, &next_state, match &result {
+                Ok((line_result, _)) => Ok(line_result),
+                Err(()) => Err(())
+            });
+
+            match result {
+                Ok((LineResult::NoOp, None)) => {},
+                Ok((LineResult::State(new_state), fut)) => {
+                    last_image = fut;
+                    state = new_state;
+                },
+                Ok((LineResult::Exit, None)) => { break; }
+                Ok((_, _)) => { unimplemented!() }
+                Err(()) => {}
+            }
+        }
+
+        if !state.interactive {
+            return Ok(());
+        }
 
         state.lines.push(vec![
             "RUN".to_owned(),
@@ -85,8 +158,6 @@ pub fn interpreter_loop() -> Result<()> {
                 Ok(line) => {
                     rl.add_history_entry(line.as_ref());
 
-                    let docker = Docker::connect_with_defaults().unwrap();
-
                     let mut next_state = state.clone();
                     next_state.image_name = match last_image {
                         None => next_state.image_name,
@@ -94,13 +165,19 @@ pub fn interpreter_loop() -> Result<()> {
                     };
                     last_image = None;
 
-                    match parse_line(line, &next_state, &docker) {
-                        Ok(LineResult::NoOp) => {},
-                        Ok(LineResult::State(new_state, fut)) => {
+                    let result = parse_line(&line, &next_state, &docker);
+                    visitor.command_run(&line, &next_state, match &result {
+                        Ok((line_result, _)) => Ok(line_result),
+                        Err(()) => Err(())
+                    });
+                    match result {
+                        Ok((LineResult::NoOp,None)) => {},
+                        Ok((LineResult::State(new_state), fut)) => {
                             last_image = fut;
                             state = new_state;
                         },
-                        Ok(LineResult::Exit) => { break; }
+                        Ok((LineResult::Exit,None)) => { break; }
+                        Ok((_, _)) => { unimplemented!() }
                         Err(()) => {}
                     }
                 },
@@ -129,6 +206,7 @@ fn print_dockerfile(lines: &Vec<Vec<String>>)
         println!("{}", l.join(" "));
     }
 }
+
 fn print_layers(lines: &Vec<Vec<String>>)
 {
     for (i, l) in lines.iter().enumerate() {
@@ -136,25 +214,27 @@ fn print_layers(lines: &Vec<Vec<String>>)
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum LineResult {
     Exit,
     NoOp, // E.g. print state...
-    State(State, Option<Pin<Box<Future<Output=Box<String>>>>>)
+    State(State)
 }
 
-pub fn parse_line(mut line: String, state: &State, docker: &Docker) -> Result<LineResult> {
-    line = line.trim().to_string();
+pub fn parse_line(mut line: &str, state: &State, docker: &Docker) -> Result<(LineResult,Option<Pin<Box<Future<Output=Box<String>>>>>)> {
+    assert_eq!(state.lines[0][0], "FROM");
+    line = line.trim();
     match line.as_ref() {
-        "" => { Ok(LineResult::NoOp) },
+        "" => { Ok((LineResult::NoOp,None)) },
         "exit" => {
             println!("Dockerfile of session:");
             print_dockerfile(&state.lines);
-            Ok(LineResult::Exit)
+            Ok((LineResult::Exit, None))
         }
         "debug" => {
             let mut state = state.clone();
             state.debug = !state.debug;
-            Ok(LineResult::State(state, None))
+            Ok((LineResult::State(state), None))
         },
         // TODO: undo 3 should remove 3rd item.
         // Replay breaks - fix then type continue.
@@ -162,20 +242,18 @@ pub fn parse_line(mut line: String, state: &State, docker: &Docker) -> Result<Li
             let mut state = state.clone();
             let item = state.lines.pop();
             println!("Undone: {:?}", item);
-            Ok(LineResult::State(state, None))
+            Ok((LineResult::State(state), None))
         }
         "layers" => {
             print_layers(&state.lines);
-            Ok(LineResult::NoOp)
+            Ok((LineResult::NoOp, None))
         },
         _ => {
             let mut state = state.clone();
             if line.starts_with("cd ") || line == "cd" {
                 state.lines.push(vec![
                     "RUN".to_owned(),
-             //       shell.to_owned(),
-             //       "-c".to_owned(),
-                    (line.clone() + " ; pwd").to_owned()
+                    (line.to_string() + " ; pwd").to_owned()
                 ]);
                 let exec_results = do_line(&docker, &state).unwrap();
                 state.lines.pop();
@@ -183,22 +261,22 @@ pub fn parse_line(mut line: String, state: &State, docker: &Docker) -> Result<Li
                 if state.debug { println!("DIR SET TO {:?}", exec_results.output[0].trim()); }
                 state.pwd = exec_results.output[0].trim().to_owned();
                 state.lines.push(vec!["WORKDIR".to_owned(),state.pwd.clone()]);
-                Ok(LineResult::State(state, Some(exec_results.image_name)))
+                Ok((LineResult::State(state), Some(exec_results.image_name)))
             } else {
                 state.lines.push(vec![
                     "RUN".to_owned(),
-                    line.clone()
+                    line.to_owned()
                 ]);
                 let exec_result = do_line(&docker, &state);
 
                 match exec_result {
                     Ok(ExecResults{state_change:true, output: _, image_name }) => {
-                        Ok(LineResult::State(state, Some(image_name)))
+                        Ok((LineResult::State(state), Some(image_name)))
                     },
                     Ok(ExecResults{state_change:false, output: _, image_name: _ }) => {
                         let removed = state.lines.remove(state.lines.len() - 1);
                         if state.debug { println!("No state change, removed {:?}", removed); }
-                        Ok(LineResult::NoOp)
+                        Ok((LineResult::NoOp, None))
                     },
                     Err(()) => {
                         Err(())
@@ -218,6 +296,7 @@ pub struct ExecResults {
 /// Ok means the command was executed. Err means that docker couldn't find the command...
 fn do_line(docker: &Docker, state: &State) -> Result<ExecResults>{
     let container_name: String = rand::thread_rng().gen_range(0., 1.3e4).to_string();
+    assert_eq!(state.lines[0][0], "FROM");
 
     let mut host_config = ContainerHostConfig::new();
     host_config.auto_remove(false);
@@ -321,7 +400,7 @@ fn do_line(docker: &Docker, state: &State) -> Result<ExecResults>{
     let changes = docker.filesystem_changes(&container);
     let state_change = match changes {
         Ok(some) => { if state.debug { println!("CHANGES: {:?}", some); }; true },
-        Err(none) => { if state.debug { println!("CHANGES: {:?}", none); }; false }
+        Err(_none) => { if state.debug { /*println!("CHANGES: {:?}", none);*/ }; false }
     };
 
     docker.remove_container(&container_name, None, Some(true), None).unwrap();
@@ -332,6 +411,7 @@ fn do_line(docker: &Docker, state: &State) -> Result<ExecResults>{
 }
 
 async fn build_image(image_name: String, command_lines: Vec<Vec<String>>, debug: bool) -> Box<String> {
+    assert_eq!(command_lines[0][0], "FROM");
     if debug { println!("building img {} as {:?}", &image_name, &command_lines) }
     let docker = Docker::connect_with_defaults().unwrap();
     {
@@ -376,7 +456,8 @@ mod tests {
             tty: false,
             image_name: "alpine:edge".to_owned(),
             pwd: "/bin".to_owned(),
-            shell: "/bin/sh".to_owned()
+            shell: "/bin/sh".to_owned(),
+            interactive: false
         };
 
         let exec_results : ExecResults = do_line(&docker, &state).unwrap();
@@ -386,40 +467,41 @@ mod tests {
         assert!(exec_results.output.iter().any(|s|s.contains("Hello World")));
     }
 
-    /// We copy echo as first command so that the second command depends upon the first
-    /// and would fail against the base alpine:edge image.
-    #[test]
-    fn second_command() {
-        block_on(async {
-            let docker = Docker::connect_with_defaults().unwrap();
-            let cmds = vec! [
-            vec!["FROM".to_owned(), "alpine:edge".to_owned()],
-            vec!["RUN".to_owned(), "/bin/sh".to_owned(), "-c".to_owned(), "echo 'Hello World' > /tmp/file".to_owned()],
-            vec!["RUN".to_owned(), "/bin/cat".to_owned(), "/tmp/file".to_owned()],
-            ];
-            let mut first = cmds.clone();
-            first.pop();
-
-            let mut state = State{
-                lines: first,
-                debug:true,
-                tty: false,
-                image_name: "alpine:edge".to_owned(),
-                pwd: "/bin".to_owned(),
-                shell: "/bin/sh".to_owned()
-            };
-
-            let exec_results1 : ExecResults = do_line(&docker, &state).unwrap();
-
-            state.lines = cmds;
-            state.image_name = *await!(exec_results1.image_name);
-
-            let exec_results: ExecResults = do_line(&docker, &state).unwrap();
-
-            //assert!(!exec_results.state_change);
-            let _x : Vec<_> = exec_results.output.iter().map( | line | println ! ("CMD_OUTPUT: {}", line)).collect();
+    // We copy echo as first command so that the second command depends upon the first
+//    /// and would fail against the base alpine:edge image.
+//    #[test]
+//    fn second_command() {
+//        block_on(async {
+//            let docker = Docker::connect_with_defaults().unwrap();
+//            let cmds = vec! [
+//            vec!["FROM".to_owned(), "alpine:edge".to_owned()],
+//            vec!["RUN".to_owned(), "/bin/sh".to_owned(), "-c".to_owned(), "echo 'Hello World' > /tmp/file".to_owned()],
+//            vec!["RUN".to_owned(), "/bin/cat".to_owned(), "/tmp/file".to_owned()],
+//            ];
+//            let mut first = cmds.clone();
+//            first.pop();
+//
+//            let mut state = State{
+//                lines: first,
+//                debug:true,
+//                tty: false,
+//                image_name: "alpine:edge".to_owned(),
+//                pwd: "/bin".to_owned(),
+//                shell: "/bin/sh".to_owned(),
+//                interactive: false,
+//            };
+//
+//            let exec_results1 : ExecResults = do_line(&docker, &state).unwrap();
+//
+//            state.lines = cmds;
+//            state.image_name = *await!(exec_results1.image_name);
+//
+//            let exec_results: ExecResults = do_line(&docker, &state).unwrap();
+//
+//            //assert!(!exec_results.state_change);
 //            let _x : Vec<_> = exec_results.output.iter().map( | line | println ! ("CMD_OUTPUT: {}", line)).collect();
-            assert!(exec_results.output.iter().any( | s |s.contains("Hello World")));
-        });
-    }
+////            let _x : Vec<_> = exec_results.output.iter().map( | line | println ! ("CMD_OUTPUT: {}", line)).collect();
+//            assert!(exec_results.output.iter().any( | s |s.contains("Hello World")));
+//        });
+//    }
 }
