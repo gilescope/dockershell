@@ -213,13 +213,13 @@ pub fn interpreter_loop(initial_state: State, visitor: &mut ExecListener) -> Res
     )
 }
 
-fn print_dockerfile(lines: &Vec<Vec<String>>) {
+fn print_dockerfile(lines: &[Vec<String>]) {
     for l in lines.iter() {
         println!("{}", l.join(" "));
     }
 }
 
-fn print_layers(lines: &Vec<Vec<String>>) {
+fn print_layers(lines: &[Vec<String>]) {
     for (i, l) in lines.iter().enumerate() {
         println!("{}: {:?}", i, l);
     }
@@ -232,14 +232,16 @@ pub enum LineResult {
     State(State),
 }
 
+type FutureImage = Pin<Box<Future<Output = Box<String>>>>;
+
 pub fn parse_line(
     mut line: &str,
     state: &State,
     docker: &Docker,
-) -> Result<(LineResult, Option<Pin<Box<Future<Output = Box<String>>>>>)> {
+) -> Result<(LineResult, Option<FutureImage>)> {
     assert_eq!(state.lines[0][0], "FROM");
     line = line.trim();
-    match line.as_ref() {
+    match line {
         "" => Ok((LineResult::NoOp, None)),
         "exit" => {
             println!("Dockerfile of session:");
@@ -288,13 +290,12 @@ pub fn parse_line(
                 match exec_result {
                     Ok(ExecResults {
                         state_change: true,
-                        output: _,
                         image_name,
+                        ..
                     }) => Ok((LineResult::State(state), Some(image_name))),
                     Ok(ExecResults {
                         state_change: false,
-                        output: _,
-                        image_name: _,
+                        ..
                     }) => {
                         let removed = state.lines.remove(state.lines.len() - 1);
                         if state.debug {
