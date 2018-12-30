@@ -33,15 +33,15 @@ use tar::Builder;
 
 type Result<T> = std::result::Result<T, ()>;
 
+/// Future Image Name. Resolves once Docker has built the image.
+type FutureImage = Pin<Box<Future<Output = Box<String>>>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
     pub debug: bool,
 
     /// Enables ascii colors and one day maybe Vi to work.
     pub tty: bool,
-
-    /// Should read from stdin for extra commands.
-    pub interactive: bool,
 
     /// Initial commands to run.
     pub lines: Vec<Vec<String>>,
@@ -53,7 +53,6 @@ pub struct State {
 impl State {
     pub fn test() -> State {
         State {
-            interactive: false,
             tty: false,
             debug: true,
             pwd: "/bin".to_owned(),
@@ -71,7 +70,6 @@ impl Default for State {
             image_name: "alpine:edge".to_owned(),
             pwd: String::new(),
             shell: "/bin/sh".to_owned(),
-            interactive: true,
         }
     }
 }
@@ -85,7 +83,69 @@ impl ExecListener for NoOpListener {
     fn command_run(&mut self, _line: &str, _state: &State, _line_result: Result<&LineResult>) {}
 }
 
-///
+pub fn interpreter_loop_from_stdin(initial_state: State) -> Result<()> {
+    let mut rl = ReadLinePrompt {
+        editor: Editor::<()>::new(),
+    };
+    if rl.editor.load_history("Dockerfile.dockershell").is_err() {
+        println!("No previous history.");
+    }
+
+    let res = interpreter_loop(initial_state, &mut rl, &mut NoOpListener {});
+
+    rl.editor.save_history("Dockerfile.dockershell").unwrap();
+    res
+}
+
+pub fn interpreter_loop_from_file(initial_state: State, visitor: &mut ExecListener) -> Result<()> {
+    let mut rl = FilePrompt {
+        lines: initial_state
+            .lines
+            .iter()
+            .skip(1)
+            .map(|s| s.join(" "))
+            .collect(),
+    };
+
+    let res = interpreter_loop(initial_state, &mut rl, visitor);
+    res
+}
+
+pub trait ReadPrompt {
+    fn read_line(&mut self, prompt: &str) -> std::result::Result<String, ReadlineError>;
+    fn add_history_entry(&mut self, val: &str);
+}
+
+struct ReadLinePrompt {
+    editor: Editor<()>,
+}
+
+impl ReadPrompt for ReadLinePrompt {
+    fn read_line(&mut self, prompt: &str) -> std::result::Result<String, ReadlineError> {
+        self.editor.readline(prompt)
+    }
+
+    fn add_history_entry(&mut self, val: &str) {
+        self.editor.add_history_entry(val);
+    }
+}
+
+struct FilePrompt {
+    lines: Vec<String>,
+}
+
+impl ReadPrompt for FilePrompt {
+    fn read_line(&mut self, _prompt: &str) -> std::result::Result<String, ReadlineError> {
+        if self.lines.is_empty() {
+            return Err(ReadlineError::Eof);
+        }
+        let res = self.lines.remove(0);
+        Ok(res)
+    }
+
+    fn add_history_entry(&mut self, _val: &str) {}
+}
+
 /// start from a known from image. FROM=
 /// create container.
 /// wait for line of input.
@@ -93,62 +153,22 @@ impl ExecListener for NoOpListener {
 /// run command
 /// containerNext = container.commitImage
 /// show results of command
-///
-pub fn interpreter_loop(initial_state: State, visitor: &mut ExecListener) -> Result<()> {
+pub fn interpreter_loop(
+    initial_state: State,
+    rl: &mut ReadPrompt,
+    visitor: &mut ExecListener,
+) -> Result<()> {
     let docker = Docker::connect_with_defaults().unwrap();
 
     block_on(
         async {
-            let mut rl = Editor::<()>::new();
-            if rl.load_history("Dockerfile.dockershell").is_err() {
-                println!("No previous history.");
-            }
-            let mut last_image: Option<Pin<Box<Future<Output = Box<String>>>>> = None;
+            let mut last_image: Option<FutureImage> = None;
             let mut state = initial_state.clone();
             state.lines.clear();
             state.lines.push(initial_state.lines[0].clone());
 
             assert_eq!(initial_state.lines[0][0], "FROM");
             state.image_name = initial_state.lines[0][1].clone();
-
-            for line in initial_state.lines.iter().skip(1) {
-                // skip FROM
-                let mut next_state = state.clone();
-                next_state.image_name = match last_image {
-                    None => next_state.image_name,
-                    Some(future) => *await!(future),
-                };
-                last_image = None;
-                let line = line.join(" ");
-                let result = parse_line(&line, &next_state, &docker);
-
-                visitor.command_run(
-                    &line,
-                    &next_state,
-                    match &result {
-                        Ok((line_result, _)) => Ok(line_result),
-                        Err(()) => Err(()),
-                    },
-                );
-
-                match result {
-                    Ok((LineResult::NoOp, None)) => {}
-                    Ok((LineResult::State(new_state), fut)) => {
-                        last_image = fut;
-                        state = new_state;
-                    }
-                    Ok((LineResult::Exit, None)) => {
-                        break;
-                    }
-                    Ok((_, _)) => unimplemented!(),
-                    Err(()) => {}
-                }
-            }
-
-            if !state.interactive {
-                return Ok(());
-            }
-
             state.lines.push(vec!["RUN".to_owned(), ("pwd").to_owned()]);
 
             let exec_results = do_line(&docker, &state).unwrap();
@@ -159,7 +179,7 @@ pub fn interpreter_loop(initial_state: State, visitor: &mut ExecListener) -> Res
                 let prompt = &(state.pwd.clone() + " ");
                 print!("{}", prompt);
                 std::io::stdout().lock().flush().unwrap();
-                let readline = rl.readline(prompt);
+                let readline = rl.read_line(prompt);
                 match readline {
                     Ok(line) => {
                         rl.add_history_entry(line.as_ref());
@@ -207,7 +227,6 @@ pub fn interpreter_loop(initial_state: State, visitor: &mut ExecListener) -> Res
                     }
                 }
             }
-            rl.save_history("Dockerfile.dockershell").unwrap();
             Ok(())
         },
     )
@@ -231,8 +250,6 @@ pub enum LineResult {
     NoOp, // E.g. print state...
     State(State),
 }
-
-type FutureImage = Pin<Box<Future<Output = Box<String>>>>;
 
 pub fn parse_line(
     mut line: &str,
@@ -313,7 +330,7 @@ pub fn parse_line(
 pub struct ExecResults {
     pub state_change: bool,
     pub output: Vec<String>,
-    pub image_name: Pin<Box<Future<Output = Box<String>>>>,
+    pub image_name: FutureImage,
 }
 
 /// Ok means the command was executed. Err means that docker couldn't find the command...
@@ -517,7 +534,6 @@ mod tests {
             image_name: "alpine:edge".to_owned(),
             pwd: "/bin".to_owned(),
             shell: "/bin/sh".to_owned(),
-            interactive: false,
         };
 
         let exec_results: ExecResults = do_line(&docker, &state).unwrap();

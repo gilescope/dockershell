@@ -8,8 +8,7 @@ fn main() {
         image_name: "alpine:edge".to_owned(),
         pwd: String::new(),
         shell: "/bin/sh".to_owned(),
-        interactive: true,
     };
 
-    interpreter_loop(state, &mut NoOpListener {}).unwrap();
+    interpreter_loop_from_stdin(state).unwrap();
 }

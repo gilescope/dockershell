@@ -1,5 +1,5 @@
 mod tests {
-    use dockershell::{interpreter_loop, ExecListener, LineResult, State};
+    use dockershell::{interpreter_loop_from_file, ExecListener, LineResult, State};
 
     struct Checker<'l> {
         next: usize,
@@ -41,7 +41,7 @@ mod tests {
             ..State::test()
         };
 
-        interpreter_loop(
+        interpreter_loop_from_file(
             state.clone(),
             &mut Checker {
                 next: 0,
@@ -68,7 +68,7 @@ mod tests {
             ..State::test()
         };
 
-        interpreter_loop(
+        interpreter_loop_from_file(
             state.clone(),
             &mut Checker {
                 next: 0,
@@ -95,7 +95,7 @@ mod tests {
             ..State::test()
         };
 
-        interpreter_loop(
+        interpreter_loop_from_file(
             state.clone(),
             &mut Checker {
                 next: 0,
@@ -131,7 +131,7 @@ mod tests {
             ..State::test()
         };
 
-        interpreter_loop(
+        interpreter_loop_from_file(
             state.clone(),
             &mut Checker {
                 next: 0,
