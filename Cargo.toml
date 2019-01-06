@@ -8,8 +8,6 @@ edition = "2018"
 rustyline="3.0"  # Command line reading
 rand="0.6"      # Unique container names
 tar="0.4"       # For building docker images
-dockworker={ path="../dockworker" } # to interact with docker
+dockworker={ git="https://github.com/gilescope/dockworker", branch="tty-and-build" } # to interact with docker
 futures-preview = { version="0.3.0-alpha.10" } # to run image build in parallel
 termion="*"         # to put terminal in raw mode for tty colors.
-#pty='*'
-#pty-shell={ path="../pty-shell" }
