@@ -34,4 +34,9 @@ Alpha - colors work in `ls` but full tty commands (like `vi`) don't currently wo
 handled anyway - where would one put the state?
 
 TODO: Add command line arguments to choose base image, or to start from a docker file.
+
 TODO: Improve test coverage / error handling. Currently isn't that hard to break.
+
+TODO: Support for other SHELLs other than `/bin/sh`.
+
+Please feel free to have a play - ideas / directions / PRs welcome.
