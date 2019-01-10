@@ -112,7 +112,6 @@ pub(crate) fn execute_command(docker: &Docker, state: &State) -> Result<ExecResu
             }
         }
     }
-    println!();
 
     let search_name = String::from("/") + &container_name;
     let mut filters = ContainerFilters::new();

@@ -4,7 +4,7 @@
     unused_import_braces,
     unused_qualifications
 )]
-#![allow(unused_assignments)]
+#![allow(unused_assignments,stable_features)]
 #![feature(pin)]
 #![feature(futures_api)]
 #![feature(await_macro)]
@@ -174,7 +174,6 @@ pub fn interpreter_loop(
 
             loop {
                 let prompt = &(state_stack.last().unwrap().pwd.clone() + " ");
-                print!("{}", prompt);
                 std::io::stdout().lock().flush().unwrap();
                 let readline = rl.read_line(prompt);
                 match readline {
@@ -300,36 +299,32 @@ pub fn parse_line(
                     "RUN".to_owned(),
                     (line.to_string() + " ; pwd").to_owned(),
                 ]);
-                match execute_command(&docker, &state) {
-                    Ok(exec_results) => {
-                        state.lines.pop();
-                        //what do you tell it to build
-                        if state.debug {
-                            println!("DIR SET TO {:?}", exec_results.output.trim());
-                        }
-                        let new_pwd = exec_results.output.trim().to_owned();
-                        if new_pwd.lines().count() == 1 {
-                            state.pwd = new_pwd;
-                            state
-                                .lines
-                                .push(vec!["WORKDIR".to_owned(), state.pwd.clone()]);
-                            let image_name = build_image(
-                                exec_results.container_name,
-                                state.lines.clone(),
-                                state.debug,
-                            )
-                            .boxed();
-                            state.image_name = "Pending".to_owned(); //todo enum.
-                            Ok((
-                                LineResult::State(state, exec_results.output),
-                                Some(image_name),
-                            ))
-                        } else {
-                            Err(())
-                        } //TODO return exec results..
-                    }
-                    Err(()) => Err(()),
+                let exec_results = execute_command(&docker, &state)?;
+                state.lines.pop();
+                //what do you tell it to build
+                if state.debug {
+                    println!("DIR SET TO {:?}", exec_results.output.trim());
                 }
+                let new_pwd = exec_results.output.trim().to_owned();
+                if new_pwd.lines().count() == 1 {
+                    state.pwd = new_pwd;
+                    state
+                        .lines
+                        .push(vec!["WORKDIR".to_owned(), state.pwd.clone()]);
+                    let image_name = build_image(
+                        exec_results.container_name,
+                        state.lines.clone(),
+                        state.debug,
+                    )
+                        .boxed();
+                    state.image_name = "Pending".to_owned(); //todo enum.
+                    Ok((
+                        LineResult::State(state, exec_results.output),
+                        Some(image_name),
+                    ))
+                } else {
+                    Err(())
+                } //TODO return exec results..
             } else {
                 state.lines.push(vec!["RUN".to_owned(), line.to_owned()]);
                 let exec_result = execute_command(&docker, &state);
