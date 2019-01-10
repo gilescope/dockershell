@@ -307,6 +307,11 @@ pub fn parse_line(
                 }
                 let new_pwd = exec_results.output.trim().to_owned();
                 if new_pwd.lines().count() == 1 {
+                    // Inefficient to have two WORKDIR statements in a row...
+                    if state.lines.last().unwrap()[0] == "WORKDIR" {
+                        state.lines.pop();
+                    }
+
                     state.pwd = new_pwd;
                     state
                         .lines
