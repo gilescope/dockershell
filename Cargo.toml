@@ -5,9 +5,10 @@ authors = ["Giles Cope <gilescope@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-rustyline="3.0"  # Command line reading
+clap="2.32"
+rustyline="5.0"  # Command line reading
 rand="0.6"      # Unique container names
 tar="0.4"       # For building docker images
-dockworker={ git="https://github.com/gilescope/dockworker", branch="tty-and-build" } # to interact with docker
-futures-preview = { version="0.3.0-alpha.11" } # to run image build in parallel
+dockworker="*" # to interact with docker
+futures-preview = { version="0.3.0-alpha.17" } # to run image build in parallel
 termion="*"         # to put terminal in raw mode for tty colors.

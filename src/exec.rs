@@ -50,8 +50,8 @@ pub(crate) fn execute_command(docker: &Docker, state: &State) -> Result<ExecResu
 
     if state.tty {
         let res = docker
-            .attach_container_tty(&container.id, None, true, true, true, true, true)
-            .unwrap();
+            .attach_container(&container.id, None, true, true, true, true, true)
+            .unwrap().unwrap();
         let result = docker.start_container(&container.id);
 
         match result {

@@ -30,7 +30,7 @@ use self::exec::{execute_command, ExecResults};
 type Result<T> = std::result::Result<T, ()>;
 
 /// Future Image Name. Resolves once Docker has built the image.
-type FutureImage = Pin<Box<Future<Output = Box<String>>>>;
+type FutureImage = Pin<Box<dyn Future<Output = Box<String>>>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
@@ -94,7 +94,7 @@ pub fn interpreter_loop_from_stdin(initial_state: State) -> Result<()> {
     res
 }
 
-pub fn interpreter_loop_from_file(initial_state: State, visitor: &mut ExecListener) -> Result<()> {
+pub fn interpreter_loop_from_file(initial_state: State, visitor: &mut dyn ExecListener) -> Result<()> {
     let mut rl = FilePrompt {
         lines: initial_state
             .lines
@@ -151,8 +151,8 @@ impl ReadPrompt for FilePrompt {
 /// show results of command
 pub fn interpreter_loop(
     initial_state: State,
-    rl: &mut ReadPrompt,
-    visitor: &mut ExecListener,
+    rl: &mut dyn ReadPrompt,
+    visitor: &mut dyn ExecListener,
 ) -> Result<()> {
     let docker = Docker::connect_with_defaults().unwrap();
 
